@@ -38,6 +38,7 @@
             border-radius: 14px;
             font-size: 17px;
             font-weight: bold;
+            cursor: pointer;
         }
     </style>
 </head>
@@ -47,6 +48,7 @@
     <h1>DriveCanvas</h1>
 
     <div class="card">
+
         <h2 id="welcome">Welcome</h2>
 
         <p>
@@ -62,6 +64,7 @@
         <button id="pairButton">
             Pair Vehicle
         </button>
+
     </div>
 
     <script>
@@ -77,11 +80,46 @@
                 "Hello, " + (user.first_name || "Driver");
         }
 
-        document
-            .getElementById("pairButton")
-            .addEventListener("click", function () {
-                tg.showAlert("DriveCanvas pairing will be added next.");
-            });
+        const pairButton =
+            document.getElementById("pairButton");
+
+        const vehicleStatus =
+            document.getElementById("vehicleStatus");
+
+        pairButton.addEventListener("click", function () {
+
+            if (!tg.showScanQrPopup) {
+                tg.showAlert(
+                    "QR scanning is not supported on this Telegram client."
+                );
+                return;
+            }
+
+            tg.showScanQrPopup(
+                {
+                    text: "Scan the DriveCanvas pairing QR shown on the car screen"
+                },
+
+                function (qrText) {
+
+                    if (!qrText) {
+                        return false;
+                    }
+
+                    tg.closeScanQrPopup();
+
+                    vehicleStatus.textContent =
+                        "QR scanned ✓";
+
+                    tg.showAlert(
+                        "DriveCanvas pairing code received:\n\n" +
+                        qrText
+                    );
+
+                    return true;
+                }
+            );
+        });
     </script>
 
 </body>
