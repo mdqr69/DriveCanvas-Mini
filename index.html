@@ -20,16 +20,16 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;backgrou
 button{width:100%;min-height:50px;border:0;border-radius:14px;padding:12px;font-size:16px;font-weight:800;margin-top:10px}
 .primary{background:#f4f4f5;color:#111}.secondary{background:#30333a;color:#fff}.danger{background:#44242a;color:#ffabb2}.safe{background:#173d2b;color:#79efa9}
 button:disabled{opacity:.45}.small{font-size:12px;color:#8c8f96}
-#controls,#statusCard{display:none}
+#controls,#statusCard,#presenceCard{display:none}
 </style>
 </head>
 <body>
 <div class="wrap">
 <h1>DriveCanvas</h1>
-<div class="version">Telegram Mini App v0.2.2 • clearer pairing + telemetry diagnostics<br><span class="small">Build 2026-09-12 • auto-update enabled</span></div>
+<div class="version">Telegram Mini App v0.3.0 • parked persistence test<br><span class="small">Build 2026-09-12 • auto-update enabled</span></div>
 
 <div class="card">
-<h2>Connection</h2>
+<h2>1. Connection</h2>
 <div class="row"><span class="label">Telegram</span><span id="telegramState">Checking…</span></div>
 <div class="row"><span class="label">Vehicle pairing</span><span id="pairState">Not paired</span></div>
 <div class="row"><span class="label">Phone relay socket</span><span id="relayState">Offline</span></div>
@@ -38,22 +38,31 @@ button:disabled{opacity:.45}.small{font-size:12px;color:#8c8f96}
 <div id="message" class="msg note">Scan the one-time QR shown in DriveCanvas on the car.</div>
 <button id="pairBtn" class="primary">PAIR VEHICLE</button>
 <div id="pairedButtons">
-<button id="verifyBtn" class="primary">VERIFY SAVED CONNECTION</button>
+<button id="verifyBtn" class="primary">VERIFY / RECONNECT CAR</button>
 <button id="replacePairBtn" class="secondary">SCAN NEW / REPLACE QR</button>
 <button id="pingBtn" class="secondary">PING CAR</button>
 <button id="forgetBtn" class="danger">REMOVE SAVED PAIRING FROM PHONE</button>
 </div>
 </div>
 
+<div id="presenceCard" class="card">
+<h2>2. Parked connection</h2>
+<div class="row"><span class="label">Car presence</span><span id="carPresence">Unknown</span></div>
+<div class="row"><span class="label">Last car heartbeat</span><span id="carHeartbeat">Never</span></div>
+<div class="row"><span class="label">Last confirmed reply</span><span id="lastConfirmed">Never</span></div>
+<div class="row"><span class="label">Phone socket reconnects</span><span id="reconnectCount">0</span></div>
+<p class="note">Important: an open phone relay socket does NOT mean the car is online. The car is confirmed only after a fresh car heartbeat or ACK.</p>
+</div>
+
 <div id="statusCard" class="card">
-<h2>Vehicle status</h2>
+<h2>3. Vehicle status</h2>
 <div id="vehicleData" class="note">No status received yet.</div>
 <button id="refreshBtn" class="secondary">REFRESH CAR STATUS</button>
 </div>
 
 <div id="controls" class="card">
-<h2>Guarded vehicle controls</h2>
-<p class="note">These requests go through DriveCanvas' existing Park / stationary / owner-authorization safety gateway. A rejected command is shown exactly as returned by the car.</p>
+<h2>4. Guarded controls</h2>
+<p class="note">Commands still pass DriveCanvas Park, stationary, fresh-data and owner-authorization safety checks.</p>
 <div class="grid">
 <button id="lockBtn" class="safe">LOCK CAR</button>
 <button id="unlockBtn" class="safe">UNLOCK CAR</button>
@@ -67,9 +76,9 @@ button:disabled{opacity:.45}.small{font-size:12px;color:#8c8f96}
 </div>
 
 <script>
-const MINI_VERSION="0.2.2";
+const MINI_VERSION="0.3.0";
 const VERSION_URL="version.json";
-const tg=window.Telegram.WebApp; tg.ready(); tg.expand();
+const tg=window.Telegram.WebApp;tg.ready();tg.expand();
 const user=tg.initDataUnsafe?.user;
 const $=id=>document.getElementById(id);
 const PAIR_KEY="drivecanvas_telegram_pairing_v2";
@@ -81,19 +90,17 @@ let socket=null;
 let socketOpenPromise=null;
 let pending=new Map();
 let busy=false;
+let autoVerifyBusy=false;
+let lastAutoVerify=0;
+let lastHeartbeatAt=0;
+let lastCarAckAt=0;
+let reconnectCount=0;
 
 async function checkForMiniUpdate(){
   try{
-    const r=await fetch(VERSION_URL+"?t="+Date.now(),{cache:"no-store"});
-    if(!r.ok)return;
-    const j=await r.json();
-    const latest=String(j.mini_version||"").trim();
-    if(latest&&latest!==MINI_VERSION){
-      const u=new URL(window.location.href);
-      u.searchParams.set("v",latest);
-      u.searchParams.set("refresh",Date.now().toString());
-      window.location.replace(u.toString());
-    }
+    const r=await fetch(VERSION_URL+"?t="+Date.now(),{cache:"no-store"});if(!r.ok)return;
+    const j=await r.json();const latest=String(j.mini_version||"").trim();
+    if(latest&&latest!==MINI_VERSION){const u=new URL(location.href);u.searchParams.set("v",latest);u.searchParams.set("refresh",Date.now().toString());location.replace(u.toString())}
   }catch(_){}
 }
 
@@ -105,54 +112,47 @@ function topicKey(){return pairing.secret.slice(0,48)}
 function cmdTopic(){return "dc-"+topicKey()+"-cmd"}
 function statusTopic(){return "dc-"+topicKey()+"-status"}
 function wsBase(){return pairing.relay.replace(/^https:/,"wss:").replace(/^http:/,"ws:")}
+function timeText(t){if(!t)return "Never";const age=Math.max(0,Date.now()-t);if(age<1000)return "now";if(age<60000)return Math.round(age/1000)+"s ago";return Math.round(age/60000)+"m ago"}
 
 function loadPairing(){
-  try{
-    let raw=localStorage.getItem(PAIR_KEY)||localStorage.getItem(OLD_PAIR_KEY);
-    if(!raw)return null;
-    let p=JSON.parse(raw);
-    if(!p.car||!p.relay||!p.secret||p.secret.length<48)return null;
-    p.confirmed=false;
-    return p;
-  }catch(_){return null}
+  try{let raw=localStorage.getItem(PAIR_KEY)||localStorage.getItem(OLD_PAIR_KEY);if(!raw)return null;let p=JSON.parse(raw);if(!p.car||!p.relay||!p.secret||p.secret.length<48)return null;p.confirmed=false;return p}catch(_){return null}
 }
-function savePairing(){const stored={...pairing,confirmed:false};localStorage.setItem(PAIR_KEY,JSON.stringify(stored))}
-function setPairing(p){pairing=p;savePairing();render();connectStatusSocket(true)}
-function forgetPairing(){localStorage.removeItem(PAIR_KEY);localStorage.removeItem(OLD_PAIR_KEY);pairing=null;closeSocket();render()}
+function savePairing(){if(pairing)localStorage.setItem(PAIR_KEY,JSON.stringify({...pairing,confirmed:false}))}
+function setPairing(p){pairing=p;lastHeartbeatAt=0;lastCarAckAt=0;savePairing();render();connectStatusSocket(true)}
+function forgetPairing(){localStorage.removeItem(PAIR_KEY);localStorage.removeItem(OLD_PAIR_KEY);pairing=null;lastHeartbeatAt=0;lastCarAckAt=0;closeSocket();render()}
 function setMessage(t,cls="note"){$("message").className="msg "+cls;$("message").textContent=t}
 function setControl(t,cls="note"){$("controlResult").className="msg "+cls;$("controlResult").textContent=t}
 
 function render(){
-  $("telegramState").textContent=user?"Connected ✓":"Open inside Telegram";
-  $("telegramState").className=user?"ok":"warn";
+  $("telegramState").textContent=user?"Connected ✓":"Open inside Telegram";$("telegramState").className=user?"ok":"warn";
   if(!pairing){
-    $("pairState").textContent="Not paired";$("pairState").className="";
-    $("carId").textContent="";$("pairBtn").style.display="block";
-    $("pairedButtons").style.display="none";$("controls").style.display="none";$("statusCard").style.display="none";
-    $("relayState").textContent="Offline";$("relayState").className="";
-    $("carVersion").textContent="—";return;
+    $("pairState").textContent="Not paired";$("pairState").className="";$("carId").textContent="";$("pairBtn").style.display="block";$("pairedButtons").style.display="none";$("presenceCard").style.display="none";$("controls").style.display="none";$("statusCard").style.display="none";$("relayState").textContent="Offline";$("relayState").className="";$("carVersion").textContent="—";return
   }
-  $("pairBtn").style.display="none";$("pairedButtons").style.display="block";
-  $("controls").style.display=pairing.confirmed?"block":"none";$("statusCard").style.display=pairing.confirmed?"block":"none";
-  $("carId").textContent="Car ID: "+pairing.car;
-  if(pairing.confirmed){$("pairState").textContent="CAR CONFIRMED ✓";$("pairState").className="ok"}
-  else{$("pairState").textContent="QR SAVED • VERIFY / RE-SCAN";$("pairState").className="warn"}
+  $("pairBtn").style.display="none";$("pairedButtons").style.display="block";$("presenceCard").style.display="block";$("controls").style.display=pairing.confirmed?"block":"none";$("statusCard").style.display=pairing.confirmed?"block":"none";$("carId").textContent="Car ID: "+pairing.car;
+  if(pairing.confirmed){$("pairState").textContent="CAR CONFIRMED ✓";$("pairState").className="ok"}else{$("pairState").textContent="SAVED • WAITING FOR CAR";$("pairState").className="warn"}
+  updatePresence()
+}
+
+function updatePresence(){
+  if(!pairing)return;
+  const freshest=Math.max(lastHeartbeatAt,lastCarAckAt);const age=freshest?Date.now()-freshest:Infinity;
+  if(age<90000){$("carPresence").textContent="ONLINE ✓";$("carPresence").className="ok"}
+  else if(age<5*60000){$("carPresence").textContent="STALE";$("carPresence").className="warn"}
+  else{$("carPresence").textContent="OFFLINE / UNKNOWN";$("carPresence").className="bad"}
+  $("carHeartbeat").textContent=timeText(lastHeartbeatAt);$("lastConfirmed").textContent=timeText(lastCarAckAt);$("reconnectCount").textContent=String(reconnectCount)
 }
 
 function parseQR(text){
   let u;try{u=new URL(text)}catch(_){throw new Error("Not a DriveCanvas pairing QR")}
   if(u.protocol!=="drivecanvas:"||u.hostname!=="pair")throw new Error("Not a DriveCanvas pairing QR");
-  const v=u.searchParams.get("v"),car=u.searchParams.get("car")||"",secret=u.searchParams.get("secret")||"";
-  let relay=u.searchParams.get("relay")||"https://ntfy.sh";
+  const v=u.searchParams.get("v"),car=u.searchParams.get("car")||"",secret=u.searchParams.get("secret")||"";let relay=u.searchParams.get("relay")||"https://ntfy.sh";
   if(!["1","2"].includes(v)||!car||secret.length<48||!relay.startsWith("https://"))throw new Error("Incomplete DriveCanvas pairing QR");
-  return {v,car,secret,relay:relay.replace(/\/+$/,"") ,confirmed:false}
+  return{v,car,secret,relay:relay.replace(/\/+$/,"") ,confirmed:false}
 }
 
 function closeSocket(){
-  try{if(socket)socket.close()}catch(_){}
-  socket=null;socketOpenPromise=null;
-  for(const [id,p] of pending){clearTimeout(p.timer);p.reject(new Error("Relay listener closed"))}
-  pending.clear()
+  try{if(socket)socket.close()}catch(_){}socket=null;socketOpenPromise=null;
+  for(const[id,p]of pending){clearTimeout(p.timer);p.reject(new Error("Relay listener closed"))}pending.clear()
 }
 
 function connectStatusSocket(force=false){
@@ -162,113 +162,102 @@ function connectStatusSocket(force=false){
   if(force)closeSocket();
   $("relayState").textContent="Connecting…";$("relayState").className="warn";
   socketOpenPromise=new Promise((resolve,reject)=>{
-    let done=false;
-    const timer=setTimeout(()=>{if(!done){done=true;reject(new Error("Relay WebSocket timeout"))}},10000);
+    let settled=false;const timer=setTimeout(()=>{if(!settled){settled=true;socketOpenPromise=null;reject(new Error("Relay WebSocket timeout"))}},10000);
     try{
       socket=new WebSocket(wsBase()+"/"+statusTopic()+"/ws");
-      socket.onopen=()=>{clearTimeout(timer);done=true;socketOpenPromise=null;$("relayState").textContent="Relay socket open ✓";$("relayState").className="ok";resolve()};
-      socket.onmessage=e=>handleRelayEvent(e.data);
-      socket.onerror=()=>{$("relayState").textContent="WebSocket error";$("relayState").className="bad";if(pairing){pairing.confirmed=false;render()}};
-      socket.onclose=()=>{
-        $("relayState").textContent="Disconnected";$("relayState").className="warn";
-        if(pairing){pairing.confirmed=false;render();setMessage("Saved QR is still on this phone, but the car is not currently confirmed reachable. Tap VERIFY SAVED CONNECTION.","warn")}
-        socketOpenPromise=null;
-        if(pairing)setTimeout(()=>{if(pairing&&(!socket||socket.readyState!==WebSocket.OPEN))connectStatusSocket().catch(()=>{})},3000)
+      socket.onopen=()=>{
+        clearTimeout(timer);settled=true;socketOpenPromise=null;reconnectCount++;$("relayState").textContent="Relay socket open ✓";$("relayState").className="ok";updatePresence();resolve();
+        setTimeout(()=>autoVerify(),600)
       };
-    }catch(e){clearTimeout(timer);done=true;socketOpenPromise=null;reject(e)}
+      socket.onmessage=e=>handleRelayEvent(e.data);
+      socket.onerror=()=>{$("relayState").textContent="WebSocket error";$("relayState").className="bad"};
+      socket.onclose=()=>{
+        $("relayState").textContent="Disconnected";$("relayState").className="warn";if(pairing){pairing.confirmed=false;render()}socketOpenPromise=null;
+        if(pairing)setTimeout(()=>{if(pairing&&(!socket||socket.readyState!==WebSocket.OPEN))connectStatusSocket().catch(()=>{})},3000)
+      }
+    }catch(e){clearTimeout(timer);settled=true;socketOpenPromise=null;reject(e)}
   });
   return socketOpenPromise
 }
 
+function noteAck(m){lastCarAckAt=Date.now();if(m.version)$("carVersion").textContent=m.version;updatePresence()}
 function handleRelayEvent(text){
   try{
-    const outer=JSON.parse(text);if(outer.event!=="message"||!outer.message)return;
-    const m=JSON.parse(outer.message);if(m.version)$("carVersion").textContent=m.version;
-    if(m.kind==="heartbeat"&&pairing){$("relayState").textContent="Car heartbeat received ✓";$("relayState").className="ok"}
-    const id=m.requestId;
-    if(id&&pending.has(id)){const p=pending.get(id);if(m.kind==="rejected"||p.kinds.includes(m.kind)){clearTimeout(p.timer);pending.delete(id);p.resolve(m)}}
+    const outer=JSON.parse(text);if(outer.event!=="message"||!outer.message)return;const m=JSON.parse(outer.message);
+    if(m.version)$("carVersion").textContent=m.version;
+    if(m.kind==="heartbeat"){
+      lastHeartbeatAt=Number(m.at)||Date.now();$("relayState").textContent="Car heartbeat received ✓";$("relayState").className="ok";updatePresence();if(pairing&&!pairing.confirmed)setTimeout(()=>autoVerify(),300)
+    }
+    const id=m.requestId;if(id&&pending.has(id)){const p=pending.get(id);if(m.kind==="rejected"||p.kinds.includes(m.kind)){clearTimeout(p.timer);pending.delete(id);noteAck(m);p.resolve(m)}}
   }catch(_){}
 }
 
-async function publish(kind,extra={}){
-  if(!pairing)throw new Error("No saved pairing");
-  if(kind!=="hello"&&!pairing.confirmed)throw new Error("Car is not confirmed in this session. Tap VERIFY SAVED CONNECTION first.");
-  await connectStatusSocket();
-  const requestId=uuid();
-  const body={kind,requestId,deviceId:deviceId(),deviceName:deviceName(),sentAt:Date.now(),...extra};
-  const r=await fetch(pairing.relay+"/"+cmdTopic()+"?cache=no",{method:"POST",headers:{"Content-Type":"text/plain;charset=UTF-8"},body:JSON.stringify(body)});
-  if(r.status===429){const reset=r.headers.get("RateLimit-Reset")||r.headers.get("Retry-After");throw new Error("Relay HTTP 429 • rate limit"+(reset?" • reset "+reset:"")+". Do not keep pressing the button.")}
-  if(!r.ok)throw new Error("Relay HTTP "+r.status);
-  return requestId
+function waitFor(id,kinds,timeout=20000){
+  return new Promise((resolve,reject)=>{const timer=setTimeout(()=>{pending.delete(id);reject(new Error("No car ACK within "+Math.round(timeout/1000)+" seconds"))},timeout);pending.set(id,{kinds,resolve,reject,timer})})
 }
 
-function waitFor(id,kinds,timeout=20000){return new Promise((resolve,reject)=>{const timer=setTimeout(()=>{pending.delete(id);reject(new Error("No car ACK within "+Math.round(timeout/1000)+" seconds"))},timeout);pending.set(id,{kinds,resolve,reject,timer})})}
-async function sendAndWait(kind,kinds,extra={},timeout=20000){const id=await publish(kind,extra);return await waitFor(id,kinds,timeout)}
+async function publishWithId(kind,requestId,extra={}){
+  if(!pairing)throw new Error("No saved pairing");
+  if(kind!=="hello"&&!pairing.confirmed)throw new Error("Car is not confirmed now. Wait for auto reconnect or tap VERIFY / RECONNECT CAR.");
+  await connectStatusSocket();
+  const body={kind,requestId,deviceId:deviceId(),deviceName:deviceName(),sentAt:Date.now(),...extra};
+  const r=await fetch(pairing.relay+"/"+cmdTopic()+"?cache=no",{method:"POST",headers:{"Content-Type":"text/plain;charset=UTF-8"},body:JSON.stringify(body)});
+  if(r.status===429){const reset=r.headers.get("RateLimit-Reset")||r.headers.get("Retry-After");throw new Error("Relay HTTP 429 • wait before retrying"+(reset?" • reset "+reset:""))}
+  if(!r.ok)throw new Error("Relay HTTP "+r.status)
+}
 
-async function verify(){
-  if(!pairing||busy)return;
-  busy=true;setMessage("Sending Hello and waiting for the car…","warn");
+async function sendAndWait(kind,kinds,extra={},timeout=20000){
+  const id=uuid();const waiter=waitFor(id,kinds,timeout);
+  try{await publishWithId(kind,id,extra);return await waiter}catch(e){const p=pending.get(id);if(p){clearTimeout(p.timer);pending.delete(id)}throw e}
+}
+
+async function verify(silent=false){
+  if(!pairing||busy||autoVerifyBusy)return;
+  if(silent)autoVerifyBusy=true;else busy=true;
+  if(!silent)setMessage("Waiting for the car…","warn");
   try{
-    const ack=await sendAndWait("hello",["hello_ack"]);if(ack.kind==="rejected")throw new Error("Car rejected this phone: "+(ack.reason||"unknown reason"));
-    pairing.confirmed=true;savePairing();render();if(ack.version)$("carVersion").textContent=ack.version;
-    setMessage("CAR CONFIRMED ✓\nThe car returned a fresh Hello ACK in this session.","ok");await requestStatus(false)
-  }catch(e){pairing.confirmed=false;savePairing();render();setMessage("The saved QR is not confirmed by the car right now.\n"+e.message+"\nIf you used RESET / REPLACE PAIRED PHONE in the car, tap SCAN NEW / REPLACE QR and scan the new code.","bad")}finally{busy=false}
+    const ack=await sendAndWait("hello",["hello_ack"],{},16000);if(ack.kind==="rejected")throw new Error("Car rejected this phone: "+(ack.reason||"unknown"));
+    pairing.confirmed=true;savePairing();noteAck(ack);render();if(!silent)setMessage("CAR CONFIRMED ✓","ok");await requestStatus(false)
+  }catch(e){pairing.confirmed=false;savePairing();render();if(!silent)setMessage("Car not reachable now.\n"+e.message,"bad")}
+  finally{if(silent)autoVerifyBusy=false;else busy=false}
+}
+
+function autoVerify(){
+  if(!pairing||pairing.confirmed||autoVerifyBusy||busy)return;const now=Date.now();if(now-lastAutoVerify<20000)return;lastAutoVerify=now;verify(true)
 }
 
 async function ping(){
-  if(!pairing||busy)return;
-  busy=true;const start=Date.now();setMessage("Pinging car…","warn");
-  try{const ack=await sendAndWait("ping",["ping_ack"]);if(ack.kind==="rejected")throw new Error("Ping rejected: "+(ack.reason||"unknown"));if(ack.version)$("carVersion").textContent=ack.version;setMessage((ack.fresh===false?"Late Ping ACK":"Ping ACK received")+" • "+(Date.now()-start)+" ms","ok")}catch(e){setMessage(e.message,"bad")}finally{busy=false}
+  if(!pairing||busy)return;busy=true;const start=Date.now();setMessage("Pinging car…","warn");
+  try{const ack=await sendAndWait("ping",["ping_ack"]);if(ack.kind==="rejected")throw new Error("Ping rejected: "+(ack.reason||"unknown"));noteAck(ack);setMessage((ack.fresh===false?"Late Ping ACK":"Ping ACK received")+" • "+(Date.now()-start)+" ms","ok")}catch(e){setMessage(e.message,"bad")}finally{busy=false}
 }
 
 function fmt(x){return x===null||x===undefined?"—":x}
 function renderVehicle(v){
-  const age=(v.ageMs>=0?Math.round(v.ageMs/1000)+"s":"—");
-  const freshness=v.fresh===true?"FRESH ✓":v.fresh===false?"STALE":"UNKNOWN";
-  const tele=v.telemetryState||"No telemetry state reported";
-  const source=v.source||"—";
-  const warning=v.safeMode?"<br><b class='bad'>CAR SAFE MODE IS ON — live telemetry services may be suppressed.</b>":"";
-  $("vehicleData").innerHTML="Telemetry: <b>"+freshness+"</b> • age <b>"+age+"</b><br>Car telemetry state: <b>"+fmt(tele)+"</b><br>Source: <b>"+fmt(source)+"</b>"+warning+"<hr style='border-color:#333'>SOC: <b>"+fmt(v.soc)+"%</b> • Fuel: <b>"+fmt(v.fuelPct)+"%</b><br>Speed: <b>"+fmt(v.speedKmh)+" km/h</b> • Gear: <b>"+fmt(v.gear)+"</b><br>A/C: <b>"+fmt(v.acStatus)+"</b> • Temp raw: <b>"+fmt(v.acTemp)+"</b> • Fan: <b>"+fmt(v.fanLevel)+"</b><br>Door lock raw: <b>"+fmt(v.lockFL)+"</b> • FL door: <b>"+fmt(v.doorFL)+"</b><br>Windows raw FL/FR/RL/RR: <b>"+[v.windowFL,v.windowFR,v.windowRL,v.windowRR].map(fmt).join(" / ")+"</b>";
+  const age=(v.ageMs>=0?Math.round(v.ageMs/1000)+"s":"—");const freshness=v.fresh===true?"FRESH ✓":v.fresh===false?"STALE":"UNKNOWN";const tele=v.telemetryState||"No telemetry state reported";const source=v.source||"—";const warning=v.safeMode?"<br><b class='bad'>CAR SAFE MODE IS ON.</b>":"";
+  $("vehicleData").innerHTML="Telemetry: <b>"+freshness+"</b> • age <b>"+age+"</b><br>Car telemetry: <b>"+fmt(tele)+"</b><br>Source: <b>"+fmt(source)+"</b>"+warning+"<hr style='border-color:#333'>SOC: <b>"+fmt(v.soc)+"%</b> • Fuel: <b>"+fmt(v.fuelPct)+"%</b><br>Speed: <b>"+fmt(v.speedKmh)+" km/h</b> • Gear: <b>"+fmt(v.gear)+"</b><br>A/C: <b>"+fmt(v.acStatus)+"</b> • Temp raw: <b>"+fmt(v.acTemp)+"</b> • Fan: <b>"+fmt(v.fanLevel)+"</b><br>Door lock raw: <b>"+fmt(v.lockFL)+"</b> • FL door: <b>"+fmt(v.doorFL)+"</b><br>Windows raw FL/FR/RL/RR: <b>"+[v.windowFL,v.windowFR,v.windowRL,v.windowRR].map(fmt).join(" / ")+"</b>"
 }
 
 async function requestStatus(show=true){
-  if(!pairing||busy&&show)return;
-  if(show){busy=true;$("vehicleData").textContent="Requesting live status…"}
-  try{const ack=await sendAndWait("status_request",["status_ack"]);if(ack.kind==="rejected")throw new Error("Status rejected: "+(ack.reason||"unknown"));if(ack.version)$("carVersion").textContent=ack.version;renderVehicle(ack.vehicle||{})}catch(e){$("vehicleData").textContent=e.message}finally{if(show)busy=false}
+  if(!pairing||(busy&&show)||!pairing.confirmed)return;if(show){busy=true;$("vehicleData").textContent="Requesting live status…"}
+  try{const ack=await sendAndWait("status_request",["status_ack"]);if(ack.kind==="rejected")throw new Error("Status rejected: "+(ack.reason||"unknown"));noteAck(ack);renderVehicle(ack.vehicle||{})}catch(e){if(show)$("vehicleData").textContent=e.message}finally{if(show)busy=false}
 }
 
 async function command(action,label){
-  if(!pairing||busy)return;
-  busy=true;setControl(label+" requested…","warn");
-  try{const ack=await sendAndWait("command",["command_ack"],{action},18000);if(ack.kind==="rejected")throw new Error("Command rejected: "+(ack.reason||"unknown"));const r=ack.result||{};const ok=r.writeSent===true;setControl((ok?"SENT ✓":"NOT SENT")+" • "+(r.code||"UNKNOWN")+"\n"+(r.message||""),ok?"ok":"bad");setTimeout(()=>requestStatus(false),1200)}catch(e){setControl(e.message,"bad")}finally{busy=false}
+  if(!pairing||busy||!pairing.confirmed)return;busy=true;setControl(label+" requested…","warn");
+  try{const ack=await sendAndWait("command",["command_ack"],{action},18000);if(ack.kind==="rejected")throw new Error("Command rejected: "+(ack.reason||"unknown"));noteAck(ack);const r=ack.result||{};const ok=r.writeSent===true;setControl((ok?"SENT ✓":"NOT SENT")+" • "+(r.code||"UNKNOWN")+"\n"+(r.message||""),ok?"ok":"bad");setTimeout(()=>requestStatus(false),1200)}catch(e){setControl(e.message,"bad")}finally{busy=false}
 }
 
 function scanPairingQr(){
   if(!tg.showScanQrPopup){tg.showAlert("QR scanning is not supported in this Telegram client.");return}
-  tg.showScanQrPopup({text:"Scan the CURRENT one-time DriveCanvas QR shown in the car"},qr=>{
-    if(!qr)return false;
-    tg.closeScanQrPopup();
-    try{setPairing(parseQR(qr));setMessage("New QR saved. Waiting for a fresh Hello ACK from the car…","warn");verify()}catch(e){setMessage(e.message,"bad");tg.showAlert(e.message)}
-    return true
-  })
+  tg.showScanQrPopup({text:"Scan the CURRENT DriveCanvas QR shown in the car"},qr=>{if(!qr)return false;tg.closeScanQrPopup();try{setPairing(parseQR(qr));setMessage("New QR saved. Waiting for the car…","warn");setTimeout(()=>verify(false),400)}catch(e){setMessage(e.message,"bad");tg.showAlert(e.message)}return true})
 }
 
-$("pairBtn").onclick=scanPairingQr;
-$("replacePairBtn").onclick=scanPairingQr;
-$("verifyBtn").onclick=verify;
-$("pingBtn").onclick=ping;
-$("refreshBtn").onclick=()=>requestStatus(true);
-$("forgetBtn").onclick=()=>{forgetPairing();setMessage("Saved pairing removed from this phone only. The car still remembers its paired phone until you use RESET / REPLACE PAIRED PHONE in the car.","warn")};
-$("lockBtn").onclick=()=>command("vehicle_lock","Lock car");
-$("unlockBtn").onclick=()=>command("vehicle_unlock","Unlock car");
-$("closeWindowsBtn").onclick=()=>command("windows_close","Close windows");
-$("acOffBtn").onclick=()=>command("climate_off","A/C off");
+$("pairBtn").onclick=scanPairingQr;$("replacePairBtn").onclick=scanPairingQr;$("verifyBtn").onclick=()=>verify(false);$("pingBtn").onclick=ping;$("refreshBtn").onclick=()=>requestStatus(true);
+$("forgetBtn").onclick=()=>{forgetPairing();setMessage("Saved pairing removed from this phone only.","warn")};
+$("lockBtn").onclick=()=>command("vehicle_lock","Lock car");$("unlockBtn").onclick=()=>command("vehicle_unlock","Unlock car");$("closeWindowsBtn").onclick=()=>command("windows_close","Close windows");$("acOffBtn").onclick=()=>command("climate_off","A/C off");
 
-render();
-checkForMiniUpdate();
-setInterval(checkForMiniUpdate,60000);
-document.addEventListener("visibilitychange",()=>{if(!document.hidden)checkForMiniUpdate()});
-if(pairing){connectStatusSocket().then(()=>{setMessage("Saved QR loaded. For safety, this session starts UNCONFIRMED. Tap VERIFY SAVED CONNECTION.","warn")}).catch(e=>setMessage("Relay listener failed: "+e.message,"bad"))}
+render();checkForMiniUpdate();setInterval(checkForMiniUpdate,60000);setInterval(()=>{updatePresence();autoVerify()},5000);document.addEventListener("visibilitychange",()=>{if(!document.hidden){checkForMiniUpdate();autoVerify()}});
+if(pairing){connectStatusSocket().then(()=>{setMessage("Saved pairing loaded. Waiting for a fresh car confirmation…","warn");setTimeout(()=>autoVerify(),500)}).catch(e=>setMessage("Relay listener failed: "+e.message,"bad"))}
 </script>
 </body>
 </html>
