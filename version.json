@@ -1,5 +1,6 @@
 {
-  "mini_version": "0.2.0",
+  "mini_version": "0.2.1",
   "transport": "websocket",
-  "deployed_at": "2026-09-12T11:22:00+04:00"
+  "deployed_at": "2026-09-12T11:34:00+04:00",
+  "notes": "Never trust a saved pairing confirmation from an older session. Controls and vehicle status stay hidden until the car returns a fresh Hello ACK in the current session."
 }
