@@ -26,7 +26,7 @@ button:disabled{opacity:.45}.small{font-size:12px;color:#8c8f96}
 <body>
 <div class="wrap">
 <h1>DriveCanvas</h1>
-<div class="version">Telegram Mini App v0.3.0 • parked persistence test<br><span class="small">Build 2026-09-12 • auto-update enabled</span></div>
+<div class="version">Telegram Mini App v0.3.1 • clearer parked timeout messages<br><span class="small">Build 2026-09-12 • auto-update enabled</span></div>
 
 <div class="card">
 <h2>1. Connection</h2>
@@ -76,7 +76,7 @@ button:disabled{opacity:.45}.small{font-size:12px;color:#8c8f96}
 </div>
 
 <script>
-const MINI_VERSION="0.3.0";
+const MINI_VERSION="0.3.1";
 const VERSION_URL="version.json";
 const tg=window.Telegram.WebApp;tg.ready();tg.expand();
 const user=tg.initDataUnsafe?.user;
@@ -193,7 +193,7 @@ function handleRelayEvent(text){
 }
 
 function waitFor(id,kinds,timeout=20000){
-  return new Promise((resolve,reject)=>{const timer=setTimeout(()=>{pending.delete(id);reject(new Error("No car ACK within "+Math.round(timeout/1000)+" seconds"))},timeout);pending.set(id,{kinds,resolve,reject,timer})})
+  return new Promise((resolve,reject)=>{const timer=setTimeout(()=>{pending.delete(id);reject(new Error("No reply to this request after "+Math.round(timeout/1000)+" seconds"))},timeout);pending.set(id,{kinds,resolve,reject,timer})})
 }
 
 async function publishWithId(kind,requestId,extra={}){
@@ -218,7 +218,7 @@ async function verify(silent=false){
   try{
     const ack=await sendAndWait("hello",["hello_ack"],{},16000);if(ack.kind==="rejected")throw new Error("Car rejected this phone: "+(ack.reason||"unknown"));
     pairing.confirmed=true;savePairing();noteAck(ack);render();if(!silent)setMessage("CAR CONFIRMED ✓","ok");await requestStatus(false)
-  }catch(e){pairing.confirmed=false;savePairing();render();if(!silent)setMessage("Car not reachable now.\n"+e.message,"bad")}
+  }catch(e){pairing.confirmed=false;savePairing();render();if(!silent)setMessage("Car did not answer this VERIFY request.\n"+e.message+".\nThe timer started when VERIFY was sent; it does not mean the car was offline for only that long.","bad")}
   finally{if(silent)autoVerifyBusy=false;else busy=false}
 }
 
@@ -228,7 +228,7 @@ function autoVerify(){
 
 async function ping(){
   if(!pairing||busy)return;busy=true;const start=Date.now();setMessage("Pinging car…","warn");
-  try{const ack=await sendAndWait("ping",["ping_ack"]);if(ack.kind==="rejected")throw new Error("Ping rejected: "+(ack.reason||"unknown"));noteAck(ack);setMessage((ack.fresh===false?"Late Ping ACK":"Ping ACK received")+" • "+(Date.now()-start)+" ms","ok")}catch(e){setMessage(e.message,"bad")}finally{busy=false}
+  try{const ack=await sendAndWait("ping",["ping_ack"]);if(ack.kind==="rejected")throw new Error("Ping rejected: "+(ack.reason||"unknown"));noteAck(ack);setMessage((ack.fresh===false?"Late Ping ACK":"Ping ACK received")+" • "+(Date.now()-start)+" ms","ok")}catch(e){setMessage("Car did not answer this PING request.\n"+e.message+".\nThe timer started when you pressed PING; it does not show how long the car has been offline.","bad")}finally{busy=false}
 }
 
 function fmt(x){return x===null||x===undefined?"—":x}
