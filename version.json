@@ -1,6 +1,6 @@
 {
-  "mini_version": "0.2.2",
+  "mini_version": "0.3.0",
   "transport": "websocket",
-  "deployed_at": "2026-09-12T12:20:00+04:00",
-  "notes": "Adds Scan New / Replace QR so a car-side pairing reset can be recovered without manually forgetting the old phone state first. Vehicle status now shows telemetry freshness, source, safe-mode state and the exact car telemetry diagnostic returned by DriveCanvas 6.26.6."
+  "deployed_at": "2026-09-12T13:00:00+04:00",
+  "notes": "Adds parked-car presence diagnostics, automatic re-verification when the car comes back online, and fixes an ACK race by registering the reply waiter before publishing the command. The phone now clearly separates an open relay socket from a confirmed live car connection."
 }
