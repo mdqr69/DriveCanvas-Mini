@@ -1,6 +1,6 @@
 {
-  "mini_version": "0.3.0",
+  "mini_version": "0.3.1",
   "transport": "websocket",
-  "deployed_at": "2026-09-12T13:00:00+04:00",
-  "notes": "Adds parked-car presence diagnostics, automatic re-verification when the car comes back online, and fixes an ACK race by registering the reply waiter before publishing the command. The phone now clearly separates an open relay socket from a confirmed live car connection."
+  "deployed_at": "2026-09-12T13:36:00+04:00",
+  "notes": "Clarifies parked-car VERIFY and PING timeouts. The 16/20-second value now explicitly means how long the current request waited for a reply; it no longer reads like the car has only been offline for that amount of time."
 }
